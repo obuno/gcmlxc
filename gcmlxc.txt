@@ -1,0 +1,138 @@
+# OS generic updates
+apt update
+apt upgrade
+
+# GCM dependencies and library needed
+apt install -y libjpeg62-dev
+apt install -y libjpeg-turbo8-dev
+apt install -y libcairo2-dev libpng-dev libtool-bin libossp-uuid-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev freerdp2-dev libpango1.0-dev libssh2-1-dev libtelnet-dev libvncserver-dev libwebsockets-dev libpulse-dev libssl-dev libvorbis-dev libwebp-dev
+
+# Tomcat & MariaDB
+apt install -y make tomcat9 mariadb-server
+
+# GCM setup
+export guacver=1.4.0
+echo $guacver
+
+wget --trust-server-names "https://apache.org/dyn/closer.cgi?action=download&filename=guacamole/$guacver/source/guacamole-server-$guacver.tar.gz" -O /usr/src/guacamole-server-$guacver.tar.gz
+wget --trust-server-names "https://apache.org/dyn/closer.cgi?action=download&filename=guacamole/$guacver/binary/guacamole-$guacver.war" -O /usr/src/guacamole-$guacver.war
+
+tar xvzf /usr/src/guacamole-server-$guacver.tar.gz -C /usr/src/
+cd /usr/src/guacamole-server-$guacver
+./configure --with-systemd-dir=/etc/systemd/system
+make
+make install
+ldconfig
+
+mkdir /etc/guacamole
+mkdir /etc/guacamole/extensions
+mkdir /etc/guacamole/lib
+echo GUACAMOLE_HOME=\"/etc/guacamole\" >> /etc/environment
+
+systemctl enable guacd.service
+systemctl start guacd.service
+systemctl status guacd.service
+systemctl restart tomcat9.service
+
+adduser guacd --disabled-password --disabled-login --gecos ""
+sed -i -e 24c"\#User=daemon" /etc/systemd/system/guacd.service
+sed -i -e 25i"User=guacd" /etc/systemd/system/guacd.service
+mkdir /var/lib/guacd
+chown -R guacd: /var/lib/guacd
+
+systemctl daemon-reload
+systemctl restart guacd
+
+# GCM extensions/auths setup
+wget --trust-server-names "https://apache.org/dyn/closer.cgi?action=download&filename=guacamole/$guacver/binary/guacamole-auth-jdbc-$guacver.tar.gz" -O /usr/src/guacamole-auth-jdbc-$guacver.tar.gz
+wget "https://dev.mysql.com/get/Downloads/Connector-J/mysql-connector-java-8.0.21.tar.gz" -O /usr/src/mysql-connector-java-8.0.21.tar.gz
+
+tar xvzf /usr/src/guacamole-auth-jdbc-$guacver.tar.gz -C /usr/src/
+tar xvzf /usr/src/mysql-connector-java-8.0.21.tar.gz -C /usr/src/
+
+cp /usr/src/guacamole-auth-jdbc-$guacver/mysql/guacamole-auth-jdbc-mysql-$guacver.jar /etc/guacamole/extensions/
+cp /usr/src/mysql-connector-java-8.0.21/mysql-connector-java-8.0.21.jar /etc/guacamole/lib/
+
+# GCM database setup
+export dbpw=$(openssl rand -hex 8)
+echo $dbpw
+
+mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS guacamole DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci;"
+mysql -u root -p -e "CREATE USER 'guacamole'@'localhost' IDENTIFIED BY '$dbpw';"
+mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS guacamole DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci;"
+mysql -u root -p -e "GRANT SELECT,INSERT,UPDATE,DELETE,CREATE ON guacamole.* TO 'guacamole'@'localhost' IDENTIFIED BY '$dbpw' WITH GRANT OPTION;"
+mysql -u root -p -e "FLUSH PRIVILEGES;"
+
+mysql -uguacamole -p$dbpw guacamole < /usr/src/guacamole-auth-jdbc-$guacver/mysql/schema/001-create-schema.sql
+mysql -uguacamole -p$dbpw guacamole < /usr/src/guacamole-auth-jdbc-$guacver/mysql/schema/002-create-admin-user.sql
+
+# GCM properties setup
+cat << EOF > /etc/guacamole/guacamole.properties
+#
+# Hostname and Guacamole server port
+#
+guacd-hostname: 127.0.0.1
+guacd-port: 4822
+# 
+# MySQL properties
+#
+mysql-hostname: 127.0.0.1
+mysql-port: 3306
+mysql-database: guacamole
+mysql-username: guacamole
+mysql-password: $dbpw
+EOF
+
+# GCM MariaDB timezone adapt
+cp /etc/mysql/mariadb.conf.d/50-server.cnf /etc/mysql/mariadb.conf.d/50-server.cnf.orginal
+mysql_tzinfo_to_sql /usr/share/zoneinfo | mysql -u root -p mysql
+sed -i '30 i\# Timezone' /etc/mysql/mariadb.conf.d/50-server.cnf
+sed -i '31 i\default_time_zone=Europe/Zurich' /etc/mysql/mariadb.conf.d/50-server.cnf
+sed -i '32 i\ ' /etc/mysql/mariadb.conf.d/50-server.cnf
+
+systemctl restart mariadb.service
+systemctl restart tomcat9.service
+
+# GCM LDAPs auths backend setup
+wget --trust-server-names "https://apache.org/dyn/closer.cgi?action=download&filename=guacamole/$guacver/binary/guacamole-auth-ldap-$guacver.tar.gz" -O /usr/src/guacamole-auth-ldap-$guacver.tar.gz
+
+tar xvzf /usr/src/guacamole-auth-ldap-$guacver.tar.gz -C /usr/src/
+cp /usr/src/guacamole-auth-ldap-$guacver/guacamole-auth-ldap-$guacver.jar /etc/guacamole/extensions/
+
+BLA="$(printf ' ')"
+cat << EOF >> /etc/guacamole/guacamole.properties
+#
+#LDAP Settings for AD
+#
+${BLA}
+ldap-hostname: ad.ghost.local
+${BLA}
+ldap-port: 636
+${BLA}
+ldap-encryption-method: ssl
+${BLA}
+ldap-search-bind-dn: CN=sGCM,CN=Users,DC=ghost,DC=local
+${BLA}
+ldap-search-bind-password: XXXXXXXXXXXXXXXXXX
+${BLA}
+ldap-user-base-dn: DC=ghost,DC=local
+${BLA}
+ldap-username-attribute: samAccountName
+${BLA}
+ldap-group-base-dn: DC=ghost,DC=local
+${BLA}
+ldap-group-name-attribute: cn
+${BLA}
+ldap-follow-referrals: false
+${BLA}
+ldap-operation-timeout: 30
+${BLA}
+ldap-user-search-filter: (&(objectClass=*)(memberOf=CN=gcm_access,CN=Users,DC=ghost,DC=local))
+${BLA}
+EOF
+
+# GCM root certificate import, trusting AD presented LDAPs cert
+keytool -importcert -alias "ldaps" -keystore "/usr/lib/jvm/java-11-openjdk-amd64/lib/security/cacerts" -storepass "changeit" -file /usr/src/Root_CA.cer -noprompt
+
+systemctl restart tomcat9.service
+tail -f -n 50 /var/log/tomcat9/catalina.out
